@@ -1,0 +1,73 @@
+# ApplicationSet: team-services
+#
+# Превращает дерево манифестов команд (team/service/component) в набор ArgoCD Application.
+# Каждый Application деплоится ОБЩИМ Helm-чартом `simple` (URFU2026-NeoMarket/helm-charts) —
+# тем же, что у infratest-example. Каталог компонента содержит только values.yaml; чарт
+# рендерит Deployment+Service+Ingress+Certificate. Публикация — флагом ingress.enabled.
+#
+# Структура репозитория-источника манифестов (argocd-teams-manifests):
+#   <commandID>/<service>/<component>/values.yaml   ← каждый каталог 3-го уровня = 1 Application
+#   например: teamdemo/svc-1/frontend/values.yaml
+#
+# Контракт чарта `simple` (его values.schema.json + _helpers.tpl):
+#   - commandID matches ^[a-z][a-z0-9]{2,31}$  → БЕЗ дефисов, и commandID ОБЯЗАН == namespace;
+#   - host рендерится как <commandID>-<release>.2026.tochka-urfu.tech.
+# Отсюда схема отображения:
+#   commandID = namespace = segment[0]            (бездефисный токен команды, напр. teamdemo)
+#   release   = <service>-<component>             (дефисы разрешены, напр. svc-1-frontend)
+#   Application.name = <team>-<service>-<component>  (нижний регистр)
+#   host = teamdemo-svc-1-frontend.2026.tochka-urfu.tech
+#
+# commandID НЕ хранится в values.yaml (иначе дублировал бы namespace и мог разойтись) —
+# инъектируется здесь как helm.parameters из segment[0]. Источник истины — путь.
+#
+# Опциональность компонентов — бесплатно: directory-генератор видит только существующие
+# каталоги. Пустая команда → 0 приложений.
+#
+# Репозиторий-источник публичный → repo-credentials не нужны.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: team-services
+  namespace: argocd
+spec:
+  goTemplate: true
+  # missingkey=error: если путь короче team/service/component — упасть явно,
+  # а не сгенерировать кривое имя/namespace (fail-fast).
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: https://github.com/URFU2026-NeoMarket/argocd-teams-manifests.git
+        revision: master
+        directories:
+          - path: "*/*/*"   # ровно team/service/component (4-й уровень не матчится)
+  template:
+    metadata:
+      name: '{{ printf "%s-%s-%s" (index .path.segments 0) (index .path.segments 1) (index .path.segments 2) | lower }}'
+    spec:
+      project: default
+      # Source = общий чарт `simple` + удалённый values.yaml компонента (как infratest-example).
+      source:
+        repoURL: https://github.com/URFU2026-NeoMarket/helm-charts.git
+        targetRevision: main
+        path: ./
+        helm:
+          # release = <service>-<component>; задаёт имена ресурсов и суффикс хоста.
+          releaseName: '{{ printf "%s-%s" (index .path.segments 1) (index .path.segments 2) | lower }}'
+          # commandID == namespace (требование чарта); берём из segment[0].
+          parameters:
+            - name: commandID
+              value: '{{ index .path.segments 0 | lower }}'
+          # values компонента лежат в репо-источнике; чарт тянет их по raw-URL.
+          valueFiles:
+            - 'https://raw.githubusercontent.com/URFU2026-NeoMarket/argocd-teams-manifests/refs/heads/master/{{ .path.path }}/values.yaml'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{ index .path.segments 0 | lower }}'   # = commandID
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - PruneLast=true

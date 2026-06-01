@@ -1,0 +1,33 @@
+# Корневой Application (app-of-apps). Применяется руками ОДИН раз (bootstrap),
+# дальше синкается сам из git. Источник — каталог apps/ этого же репо.
+#
+# После применения: правка apps/*.yaml → git push → root авто-синк → объекты в кластере.
+# Ручной `kubectl apply` для ApplicationSet больше не нужен.
+#
+# ⚠️ Каскадный prune: удаление файла из apps/ снесёт соответствующий Argo-CR;
+# удаление team-services.yaml → снос ApplicationSet → prune всех teamdemo-* и их ворклоадов.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  # finalizer защищает САМ root от случайного удаления без контролируемого каскада
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/URFU2026-NeoMarket/argocd-bootstrap.git
+    targetRevision: master
+    path: apps          # синкаем весь каталог apps/ (только Argo-CR!)
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd   # Application/ApplicationSet живут в argocd
+  syncPolicy:
+    automated:
+      prune: true       # файл убрали из git → ArgoCD убрал ресурс
+      selfHeal: true    # ручной kubectl edit откатится к git
+    syncOptions:
+      - ApplyOutOfSyncOnly=true
