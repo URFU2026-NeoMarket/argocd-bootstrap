@@ -46,21 +46,32 @@ spec:
       name: '{{ printf "%s-%s-%s" (index .path.segments 0) (index .path.segments 1) (index .path.segments 2) | lower }}'
     spec:
       project: default
-      # Source = общий чарт `simple` + удалённый values.yaml компонента (как infratest-example).
-      source:
-        repoURL: https://github.com/URFU2026-NeoMarket/helm-charts.git
-        targetRevision: main
-        path: ./
-        helm:
-          # release = <service>-<component>; задаёт имена ресурсов и суффикс хоста.
-          releaseName: '{{ printf "%s-%s" (index .path.segments 1) (index .path.segments 2) | lower }}'
-          # commandID == namespace (требование чарта); берём из segment[0].
-          parameters:
-            - name: commandID
-              value: '{{ index .path.segments 0 | lower }}'
-          # values компонента лежат в репо-источнике; чарт тянет их по raw-URL.
-          valueFiles:
-            - 'https://raw.githubusercontent.com/URFU2026-NeoMarket/argocd-teams-manifests/refs/heads/master/{{ .path.path }}/values.yaml'
+      # Multi-source: общий чарт `simple` + values команды из git-репо argocd-teams-manifests.
+      # values подключены как git-источник (ref: values), а не как HTTP valueFile по raw-URL:
+      # ArgoCD инвалидирует кеш манифестов repo-server только по смене git-SHA источников.
+      # Через raw-URL правка одних values не меняла бы SHA чарта (helm-charts@main) и не
+      # подхватилась бы до истечения repo-cache-expiration (24h); git-источник даёт новый SHA
+      # на каждый коммит → изменение видно в штатный reconcile (и мгновенно по webhook).
+      sources:
+        # values-источник: ref без path/chart → манифестов не даёт, только отдаёт файлы для $values.
+        # Ревизия master — та же, что у git-генератора выше (единый источник истины пути).
+        - repoURL: https://github.com/URFU2026-NeoMarket/argocd-teams-manifests.git
+          targetRevision: master
+          ref: values
+        - repoURL: https://github.com/URFU2026-NeoMarket/helm-charts.git
+          targetRevision: main
+          path: ./
+          helm:
+            # release = <service>-<component>; задаёт имена ресурсов и суффикс хоста.
+            releaseName: '{{ printf "%s-%s" (index .path.segments 1) (index .path.segments 2) | lower }}'
+            # commandID == namespace (требование чарта); берём из segment[0].
+            parameters:
+              - name: commandID
+                value: '{{ index .path.segments 0 | lower }}'
+            # $values = корень argocd-teams-manifests@master; путь = каталог компонента.
+            # '$values/' — литерал (вне {{ }}), goTemplate его не трогает; {{ .path.path }} = team/service/component.
+            valueFiles:
+              - '$values/{{ .path.path }}/values.yaml'
       destination:
         server: https://kubernetes.default.svc
         namespace: '{{ index .path.segments 0 | lower }}'   # = commandID
